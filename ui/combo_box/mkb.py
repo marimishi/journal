@@ -75,18 +75,19 @@ class MkbDelegate(QtWidgets.QStyledItemDelegate):
             model.setData(index, editor.lineEdit().text(), QtCore.Qt.ItemDataRole.EditRole)
 
 
-
 class SearchableComboBox(QtWidgets.QComboBox):
-    """Кастомный QComboBox с автодополнением, корректно работающий в таблицах."""
-
+    """Универсальный комбобокс с защитой от ложных срабатываний при двойном клике."""
     item_selected = QtCore.Signal(str)
 
-    def __init__(self, items_list: list[str], placeholder: str = "", parent=None):
+    def __init__(self, items: list[str], placeholder: str = "", parent=None):
         super().__init__(parent)
         self.setEditable(True)
         self.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
-
-        self.addItems(items_list)
+        
+        # Время открытия выпадающего списка (для блокировки фантомных кликов)
+        self._popup_time = QtCore.QTime()
+        
+        self.addItems(items)
         self.setCurrentIndex(-1)
         self.lineEdit().setPlaceholderText(placeholder)
 
@@ -94,43 +95,53 @@ class SearchableComboBox(QtWidgets.QComboBox):
         completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
         completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
         
-        # Завершение редактирования при выборе из автодополнения
-        completer.activated.connect(self._on_completer_activated)
+        completer.activated[str].connect(self._on_completer_activated)
         self.setCompleter(completer)
-
-        # Выбор из стандартного выпадающего списка
         self.activated.connect(self._on_activated)
 
-    def _on_activated(self, index):
+    def _on_activated(self, index: int):
+        # Игнорируем события выбора, если с момента открытия списка прошло менее 200 мс
+        if self._popup_time.isValid() and self._popup_time.msecsTo(QtCore.QTime.currentTime()) < 200:
+            return
+            
         if index >= 0:
-            text = self.itemText(index)
-            self.item_selected.emit(text)
+            self.item_selected.emit(self.itemText(index))
 
-    def _on_completer_activated(self, text):
+    def _on_completer_activated(self, text: str):
+        # Аналогичная защита для автодополнения
+        if self._popup_time.isValid() and self._popup_time.msecsTo(QtCore.QTime.currentTime()) < 200:
+            return
+            
         self.item_selected.emit(text)
 
     def showPopup(self):
-        """Автоматически разворачивает список при начале редактирования."""
+        self.blockSignals(True)
+        if self.completer():
+            self.completer().blockSignals(True)
+
         super().showPopup()
+
+        self.blockSignals(False)
+        if self.completer():
+            self.completer().blockSignals(False)
+            
+        # Фиксируем точное время раскрытия списка
+        self._popup_time = QtCore.QTime.currentTime()
 
 
 class ListChoiceDelegate(QtWidgets.QStyledItemDelegate):
-    """Делегат выбора из списка для QTableWidget."""
-
+    """Универсальный делегат для выпадающих списков."""
     def __init__(self, items_list: list[str], placeholder: str = "Выберите...", parent=None):
         super().__init__(parent)
         self.items_list = items_list
         self.placeholder = placeholder
 
     def createEditor(self, parent, option, index):
-        editor = SearchableComboBox(
-            self.items_list, placeholder=self.placeholder, parent=parent
-        )
+        editor = SearchableComboBox(self.items_list, placeholder=self.placeholder, parent=parent)
         editor.selected_text = None
 
         def on_selected(text):
             editor.selected_text = text
-            # Фиксируем данные и закрываем редактор только после клика/выбора
             self.commitData.emit(editor)
             self.closeEditor.emit(
                 editor, QtWidgets.QAbstractItemDelegate.EndEditHint.SubmitModelCache
@@ -138,19 +149,17 @@ class ListChoiceDelegate(QtWidgets.QStyledItemDelegate):
 
         editor.item_selected.connect(on_selected)
         
-        # Автоматически раскрываем выпадающий список сразу при входе в ячейку
-        QtCore.QTimer.singleShot(0, editor.showPopup)
+        # Задержка в 100 мс гарантирует, что пользователь успеет отпустить 
+        # кнопку мыши ДО того, как появится выпадающий список
+        QtCore.QTimer.singleShot(100, editor.showPopup)
         return editor
 
     def setEditorData(self, editor, index):
         value = index.model().data(index, QtCore.Qt.ItemDataRole.EditRole) or ""
         editor.lineEdit().setText(value)
-        # Выделяем текст, чтобы пользователь мог сразу начать вводить новый
         editor.lineEdit().selectAll()
 
     def setModelData(self, editor, model, index):
-        # Если элемент был выбран из списка — берем selected_text,
-        # если пользователь просто ввел текст вручную и нажал Enter — берем из lineEdit
         if getattr(editor, "selected_text", None) is not None:
             model.setData(index, editor.selected_text, QtCore.Qt.ItemDataRole.EditRole)
         else:

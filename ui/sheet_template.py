@@ -94,8 +94,16 @@ class MkbComboBox(QtWidgets.QComboBox):
             self.mkb_selected.emit(code, name)
 
     def showPopup(self):
-        """Автоматически разворачивает список при начале редактирования."""
+        # Блокируем сигналы комбобокса и комплитера на время открытия
+        self.blockSignals(True)
+        if self.completer():
+            self.completer().blockSignals(True)
+
         super().showPopup()
+
+        self.blockSignals(False)
+        if self.completer():
+            self.completer().blockSignals(False)
 
 
 class MkbDelegate(QtWidgets.QStyledItemDelegate):
