@@ -6,7 +6,7 @@ from back.style import get_style
 from ui.admin.admin_panel import AdminPanel
 from ui.ambulance import AmbulanceSheet
 from ui.ambulator import AmbulatorSheet
-
+from back.data_manager import DataManager
 
 def resource_path(relative_path):
     try:
@@ -20,6 +20,7 @@ class MainScreen(QtWidgets.QMainWindow):
 
     def __init__(self, backend_handler=None):
         super().__init__()
+        self.db = DataManager()
         self.backend_handler = backend_handler
 
         self.setWindowTitle("Анализатор отчетов")
@@ -49,10 +50,58 @@ class MainScreen(QtWidgets.QMainWindow):
             frame = ScreenClass(parent=self.stacked_widget)
             self.frames[screen_name] = frame
             self.stacked_widget.addWidget(frame)
+            
         self.frames["AmbulatorSheet"].target_sheet = self.frames["AmbulanceSheet"]
 
+        # Проверка наличия и валидности файла базы данных при старте
+        self._check_file_path()
 
-        self.show_screen("AmbulatorSheet")
+    def _check_file_path(self):
+        """Проверяет путь к файлу. Если путь не задан или файл перемещен — запрашивает выбор."""
+        while not self.db.has_valid_file_path():
+            msg = QtWidgets.QMessageBox(self)
+            msg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Выбор базы данных")
+            
+            if self.db.file_path and not self.db.has_valid_file_path():
+                msg.setText("Файл базы данных перемещён или удалён!")
+                msg.setInformativeText(
+                    f"Не удалось найти файл по пути:\n{self.db.file_path}\n\n"
+                    "Пожалуйста, укажите новое местоположение или создайте новый файл."
+                )
+            else:
+                msg.setText("Файл сохранения data.json не выбран!")
+                msg.setInformativeText("Выберите путь к зашифрованной базе данных для продолжения работы.")
+            
+            btn_select = msg.addButton("Выбрать / Создать data.json", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            btn_exit = msg.addButton("Выход из программы", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            
+            msg.exec()
+
+            if msg.clickedButton() == btn_exit:
+                sys.exit(0)
+
+            file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Выберите или создайте файл data.json",
+                "data.json",
+                "JSON Files (*.json)"
+            )
+            
+            if file_path:
+                self.db.set_file_path(file_path)
+                # Если файла не существовало, инициализируем базовую структуру
+                if not os.path.exists(file_path):
+                    self.db.save_data({"doctors": [], "ambulator": [], "ambulance": []})
+                
+                # Загружаем данные в открытые таблицы
+                self._reload_all_sheets()
+
+    def _reload_all_sheets(self):
+        """Перезагружает данные во всех дочерних таблицах после выбора файла."""
+        for frame in self.frames.values():
+            if hasattr(frame, 'load_data'):
+                frame.load_data()
 
     def _create_sidebar(self, parent_layout):
         self.sidebar_frame = QtWidgets.QFrame()

@@ -1,6 +1,7 @@
 from PySide6 import QtWidgets, QtCore, QtGui
 from back.user.users import AdminSession
 from ui.admin.doctors_widget import DoctorsTableWidget
+from ui.admin.medication_widget import MedicationManagerWidget
 
 class DashboardWidget(QtWidgets.QWidget):
     logout_requested = QtCore.Signal()
@@ -30,6 +31,9 @@ class DashboardWidget(QtWidgets.QWidget):
         tab_widget = QtWidgets.QTabWidget()
         self.doctors_tab = DoctorsTableWidget()
         tab_widget.addTab(self.doctors_tab, "Врачи")
+        
+        self.medication_tab = MedicationManagerWidget()
+        tab_widget.addTab(self.medication_tab, "Препараты")
 
         layout.addWidget(tab_widget)
 
