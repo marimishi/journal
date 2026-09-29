@@ -30,6 +30,11 @@ class AmbulanceSheet(BaseSheet):
             columns=columns,
             mkb_col_idx=8,
             mkb_code_col_idx=7,
+            address_col_idx=5,
+            gender_col_idx=3,        # "Пол"
+            medication_col_idx=9,    # "Назначенное лечение"
+            doctor_col_idx=10,       # "Врач, назначивший лечение"
+            outcome_col_idx=11,      # "Исход"
             parent=parent,
         )
 

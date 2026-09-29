@@ -29,9 +29,11 @@ class AmbulatorSheet(BaseSheet):
             columns=columns,
             mkb_col_idx=7,
             mkb_code_col_idx=None,
+            doctor_col_idx=2,        # "ФИО врача, вызвавшего БСМП"
+            address_col_idx=5,       # "Домашний адрес"
+            mo_col_idx=8,            # "МО по месту прикрепления пациента"
             parent=parent,
         )
-
         self.header.setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch
         )

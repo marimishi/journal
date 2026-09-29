@@ -4,81 +4,154 @@ import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from back.data_manager import DataManager
-from ui.combo_box.mkb import MkbDelegate
+from ui.combo_box.mkb import SearchableComboBox, ListChoiceDelegate
 from ui.functions.lock_policy import apply_row_lock_policy, is_record_locked
 
-DEFAULT_MEDICATIONS = [
-    "Tab. Captoprili 25 mg - 1 таб., внутрь",
-    "Tab. Moxonidini 0,2 mg - 1 таб., внутрь",
-    "Tab. Moxonidini 0,4 mg - 1 таб., внутрь",
-    "Solutio Glucosi 5% – 200 ml (в/в кап.) №1",
-    "Solutio Glucosi 40% – 10 ml (в/в струйно) №1",
-    "Solutio Natrii chloridi 0,9% – 200 ml (в/в кап.) №1",
-    "Nitroglycerini spray - 1 доза, под язык",
-    "Solutio Magnesii sulfatis 25% – 10 ml (в/в медленно) №1",
-    "Solutio Furosemidi 1% (10 мг/мл) – 2 ml (в/в или в/м) №1",
-    "Solutio Ketoprofeni 10% (100 мг/2 мл) – 2 ml (в/м или в/в) №1",
-    "Solutio Chloropyramini 2% (20 мг/мл) – 1 ml (в/м или в/в) №1",
-    "Solutio Platyphyllini hydrotartratis 0,2% – 1 ml (п/к или в/м) №1",
-    "Solutio Prednisoloni 30 мг/мл – 1–3 ml (в/в или в/м) №1",
-    "Solutio Dexamethasoni 4 мг/мл – 1 ml (в/в или в/м) №1",
-    "Solutio Metoclopramidi 0,5% (10 мг/2 мл) – 2 ml (в/м или в/в) №1",
-    "Solutio Ondansetroni (Latran) – 5 ml (в/в кап. или в/в струйно) №1",
-    "Solutio Adrenalini 0,1% – 1 ml (в/м) №1",
-    "Astmasoli aerosoli - 1–2 дозы, ингаляционно",
-    "Tab. Nifedipini 10 mg - 1 таб., внутрь",
-    "Tab. Anaprilini (Propranololum) 10 mg - 1 таб., внутрь",
-    "Tab. Anaprilini (Propranololum) 40 mg - 1 таб., внутрь",
-    "Tab. Metoprololi 25 mg - 1 таб., внутрь",
-    "Tab. Metoprololi 50 mg - 1 таб., внутрь",
-    "Tab. Acidi acetylsalicylici (Aspirinum) 150–300 mg - 1 таб., разжевать",
-    "Corvaloli 20–30 капель (внутрь)",
-]
+from data import DEFAULT_MEDICATIONS, HOSPITALS
 
 
 class AddressDelegate(QtWidgets.QStyledItemDelegate):
-    """Делегат с автодополнением улиц."""
+    """Делегат адресов в стиле MkbDelegate с исправленным автооткрытием."""
 
     def __init__(self, streets_list: list[str], parent=None):
         super().__init__(parent)
         self.streets_list = streets_list
 
     def createEditor(self, parent, option, index):
-        editor = QtWidgets.QLineEdit(parent)
-        completer = QtWidgets.QCompleter(self.streets_list, editor)
-        completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
-        completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
-        editor.setCompleter(completer)
+        editor = SearchableComboBox(
+            self.streets_list, placeholder="Введите адрес...", parent=parent
+        )
+        editor.selected_text = None
+
+        def on_selected(text):
+            editor.selected_text = text
+            self.commitData.emit(editor)
+            self.closeEditor.emit(
+                editor, QtWidgets.QAbstractItemDelegate.EndEditHint.SubmitModelCache
+            )
+
+        editor.item_selected.connect(on_selected)
+        
+        # Автоматически раскрываем выпадающий список
+        QtCore.QTimer.singleShot(0, editor.showPopup)
         return editor
 
-
-class ListChoiceDelegate(QtWidgets.QStyledItemDelegate):
-    """Выпадающий список (QComboBox) с возможностью ручного ввода/поиска."""
-
-    def __init__(self, items_list: list[str], parent=None):
-        super().__init__(parent)
-        self.items_list = items_list
-
-    def createEditor(self, parent, option, index):
-        combo = QtWidgets.QComboBox(parent)
-        combo.setEditable(True)
-        combo.addItems([""] + self.items_list)
-
-        completer = combo.completer()
-        if completer:
-            completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
-            completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
-        return combo
-
     def setEditorData(self, editor, index):
-        text = index.model().data(index, QtCore.Qt.ItemDataRole.EditRole) or ""
-        editor.setCurrentText(text)
+        value = index.model().data(index, QtCore.Qt.ItemDataRole.EditRole) or ""
+        editor.lineEdit().setText(value)
+        editor.lineEdit().selectAll()
 
     def setModelData(self, editor, model, index):
-        model.setData(index, editor.currentText(), QtCore.Qt.ItemDataRole.EditRole)
+        if getattr(editor, "selected_text", None) is not None:
+            model.setData(index, editor.selected_text, QtCore.Qt.ItemDataRole.EditRole)
+        else:
+            model.setData(index, editor.lineEdit().text(), QtCore.Qt.ItemDataRole.EditRole)
+
+
+class MkbComboBox(QtWidgets.QComboBox):
+    
+    mkb_selected = QtCore.Signal(str, str)
+
+    def __init__(self, mkb_df: pd.DataFrame, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+
+        self._text_to_data = {}  # Словарь для поиска данных по тексту из комплитера
+
+        if not mkb_df.empty:
+            codes = mkb_df['MKB_CODE'].astype(str).str.strip()
+            names = mkb_df['MKB_NAME'].astype(str).str.strip()
+            for code, name in zip(codes, names):
+                display_str = f"{code} - {name}"
+                self.addItem(display_str, userData=(code, name))
+                self._text_to_data[display_str] = (code, name)
+
+        self.setCurrentIndex(-1)
+        self.lineEdit().setPlaceholderText("Введите код или диагноз...")
+
+        completer = QtWidgets.QCompleter(self.model(), self)
+        completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
+        completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        
+        # Разделяем обработку сигналов
+        completer.activated[str].connect(self._on_completer_activated)
+        self.setCompleter(completer)
+        self.activated.connect(self._on_activated)
+
+    def _on_activated(self, index):
+        if index >= 0:
+            data = self.itemData(index)
+            if data:
+                code, name = data
+                self.mkb_selected.emit(code, name)
+
+    def _on_completer_activated(self, text: str):
+        # Достаем данные по тексту из автодополнения
+        data = self._text_to_data.get(text)
+        if data:
+            code, name = data
+            self.mkb_selected.emit(code, name)
+
+    def showPopup(self):
+        """Автоматически разворачивает список при начале редактирования."""
+        super().showPopup()
+
+
+class MkbDelegate(QtWidgets.QStyledItemDelegate):
+    def __init__(self, mkb_df, parent=None, code_col_idx=None):
+        super().__init__(parent)
+        self.mkb_df = mkb_df
+        self.code_col_idx = code_col_idx
+
+    def createEditor(self, parent, option, index):
+        editor = MkbComboBox(self.mkb_df, parent)
+        editor.selected_code = None
+        editor.selected_name = None
+
+        def on_mkb_selected(code, name):
+            editor.selected_code = code
+            editor.selected_name = name
+            
+            self.commitData.emit(editor)
+            self.closeEditor.emit(editor, QtWidgets.QAbstractItemDelegate.EndEditHint.SubmitModelCache)
+
+        editor.mkb_selected.connect(on_mkb_selected)
+        
+        # Автоматическое открытие списка
+        QtCore.QTimer.singleShot(0, editor.showPopup)
+        return editor
+
+    def setEditorData(self, editor, index):
+        value = index.model().data(index, QtCore.Qt.ItemDataRole.EditRole) or ""
+        editor.lineEdit().setText(value)
+        editor.lineEdit().selectAll()
+
+    def setModelData(self, editor, model, index):
+        if getattr(editor, 'selected_name', None) is not None:
+            model.setData(index, editor.selected_name, QtCore.Qt.ItemDataRole.EditRole)
+            
+            target_code_col = self.code_col_idx if self.code_col_idx is not None else (index.column() - 1)
+            code_index = model.index(index.row(), target_code_col)
+            model.setData(code_index, editor.selected_code, QtCore.Qt.ItemDataRole.EditRole)
+        else:
+            model.setData(index, editor.lineEdit().text(), QtCore.Qt.ItemDataRole.EditRole)
 
 
 class BaseSheet(QtWidgets.QWidget):
+
+    OUTCOME_OPTIONS = [
+        "Выздоровление",
+        "Улучшение",
+        "Без изменений",
+        "Ухудшение",
+        "Летальный",
+    ]
+
+    GENDER_OPTIONS = [
+        "Мужской",
+        "Женский",
+    ]
 
     def __init__(
         self,
@@ -89,6 +162,9 @@ class BaseSheet(QtWidgets.QWidget):
         doctor_col_idx: int = None,
         medication_col_idx: int = None,
         mkb_code_col_idx: int = None,
+        gender_col_idx: int = None,
+        mo_col_idx: int = None,
+        outcome_col_idx: int = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -101,6 +177,9 @@ class BaseSheet(QtWidgets.QWidget):
         self.doctor_col_idx = doctor_col_idx
         self.medication_col_idx = medication_col_idx
         self.mkb_code_col_idx = mkb_code_col_idx
+        self.gender_col_idx = gender_col_idx
+        self.mo_col_idx = mo_col_idx
+        self.outcome_col_idx = outcome_col_idx
         self.is_loading = False
 
         # Загрузка внешних справочников
@@ -150,16 +229,47 @@ class BaseSheet(QtWidgets.QWidget):
 
         # 3. Делегат врачей
         if self.doctor_col_idx is not None:
-            self.doctor_delegate = ListChoiceDelegate(self.doctors_list, self.table)
+            self.doctor_delegate = ListChoiceDelegate(
+                self.doctors_list, placeholder="Выберите врача...", parent=self.table
+            )
             self.table.setItemDelegateForColumn(
                 self.doctor_col_idx, self.doctor_delegate
             )
 
         # 4. Делегат препаратов
         if self.medication_col_idx is not None:
-            self.medication_delegate = ListChoiceDelegate(self.medications_list, self.table)
+            self.medication_delegate = ListChoiceDelegate(
+                self.medications_list, placeholder="Выберите препарат...", parent=self.table
+            )
             self.table.setItemDelegateForColumn(
                 self.medication_col_idx, self.medication_delegate
+            )
+
+        # 5. Делегат пола
+        if self.gender_col_idx is not None:
+            self.gender_delegate = ListChoiceDelegate(
+                self.GENDER_OPTIONS, placeholder="Выберите пол...", parent=self.table
+            )
+            self.table.setItemDelegateForColumn(
+                self.gender_col_idx, self.gender_delegate
+            )
+
+        # 6. Делегат МО по месту
+        if self.mo_col_idx is not None:
+            self.mo_delegate = ListChoiceDelegate(
+                HOSPITALS, placeholder="Выберите МО...", parent=self.table
+            )
+            self.table.setItemDelegateForColumn(
+                self.mo_col_idx, self.mo_delegate
+            )
+
+        # 7. Делегат исхода
+        if self.outcome_col_idx is not None:
+            self.outcome_delegate = ListChoiceDelegate(
+                self.OUTCOME_OPTIONS, placeholder="Выберите исход...", parent=self.table
+            )
+            self.table.setItemDelegateForColumn(
+                self.outcome_col_idx, self.outcome_delegate
             )
 
         self.layout.addWidget(self.table)
@@ -219,8 +329,15 @@ class BaseSheet(QtWidgets.QWidget):
         return DEFAULT_MEDICATIONS
 
     def refresh_doctors_list(self):
-        """Обновляет список врачей из базы данных при изменении настроек кабинета."""
+        """Обновляет список врачей и заново переназначает делегат для колонки."""
         self.doctors_list = self._load_doctors_data()
+        if self.doctor_col_idx is not None:
+            self.doctor_delegate = ListChoiceDelegate(
+                self.doctors_list, placeholder="Выберите врача...", parent=self.table
+            )
+            self.table.setItemDelegateForColumn(
+                self.doctor_col_idx, self.doctor_delegate
+            )
 
     def _start_lock_timer(self):
         """Запускает таймер, обновляющий состояние блокировки строк каждую минуту."""
@@ -292,6 +409,8 @@ class BaseSheet(QtWidgets.QWidget):
 
     def add_row(self):
         """Добавление новой записи в таблицу с предустановкой доктора по умолчанию."""
+        self.is_loading = True  # Блокируем триггер itemChanged на время формирования строки
+
         row_count = self.table.rowCount()
         self.table.insertRow(row_count)
 
@@ -320,13 +439,15 @@ class BaseSheet(QtWidgets.QWidget):
         self._setup_action_button(row_count)
         apply_row_lock_policy(self.table, row_count, now_str)
 
-        self.save_data()
+        self.is_loading = False  # Включаем отслеживание обратно
+        self.save_data()         # Одиночное сохранение
 
         focus_col = 2
-        self.table.setCurrentCell(row_count, focus_col)
-        item_to_edit = self.table.item(row_count, focus_col)
-        if item_to_edit:
-            self.table.editItem(item_to_edit)
+        if self.table.columnCount() > focus_col:
+            self.table.setCurrentCell(row_count, focus_col)
+            item_to_edit = self.table.item(row_count, focus_col)
+            if item_to_edit:
+                self.table.editItem(item_to_edit)
 
     def on_item_changed(self, item: QtWidgets.QTableWidgetItem):
         if self.is_loading:
