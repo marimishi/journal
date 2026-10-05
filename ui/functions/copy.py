@@ -4,12 +4,17 @@ from PySide6 import QtWidgets, QtCore
 def copy_row_by_headers(
     source_table: QtWidgets.QTableWidget, 
     source_row: int, 
-    target_table: QtWidgets.QTableWidget
+    target_table: QtWidgets.QTableWidget,
+    aliases: dict | None = None,
 ) -> int:
     """
     Копирует данные из строки `source_row` таблицы `source_table` 
     в новую строку `target_table`, сопоставляя колонки по одинаковым названиям.
     
+    :param aliases: {заголовок в источнике: заголовок в приёмнике} для колонок с разными
+        названиями, например {"Время прибытия БСМП": "Время"}. Значение из источника
+        заменяет колонку приёмника с тем же названием. Если оно пустое, в приёмнике
+        остаётся значение по умолчанию (текущее время новой строки).
     :return: Индекс созданной строки в целевой таблице.
     """
     src_data = {}
@@ -24,6 +29,13 @@ def copy_row_by_headers(
         cell_item = source_table.item(source_row, col)
         val = cell_item.text() if cell_item else ""
         src_data[header_name] = (val, cell_item.textAlignment() if cell_item else None)
+
+    for src_name, tgt_name in (aliases or {}).items():
+        alias_value = src_data.pop(src_name, None)
+        if alias_value and alias_value[0].strip():
+            src_data[tgt_name] = alias_value
+        else:
+            src_data.pop(tgt_name, None)
 
     target_row = target_table.rowCount()
     

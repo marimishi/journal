@@ -4,6 +4,7 @@ import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from back.data_manager import DataManager
+from back.user.users import AdminSession
 from ui.combo_box.mkb import SearchableComboBox, ListChoiceDelegate
 from ui.functions.lock_policy import apply_row_lock_policy, is_record_locked
 
@@ -146,12 +147,78 @@ class MkbDelegate(QtWidgets.QStyledItemDelegate):
             model.setData(index, editor.lineEdit().text(), QtCore.Qt.ItemDataRole.EditRole)
 
 
+class MultilineTextDelegate(QtWidgets.QStyledItemDelegate):
+    """Многострочный редактор для длинного текста.
+
+    Enter — сохранить, Shift+Enter (или Ctrl+Enter) — перенос строки,
+    Tab — сохранить и перейти дальше, Esc — отмена.
+    """
+
+    MIN_EDITOR_HEIGHT = 120
+
+    def createEditor(self, parent, option, index):
+        editor = QtWidgets.QPlainTextEdit(parent)
+        editor.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        editor.setTabChangesFocus(True)
+        option_text = editor.document().defaultTextOption()
+        option_text.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        editor.document().setDefaultTextOption(option_text)
+        editor.setPlaceholderText("Enter — сохранить, Shift+Enter — новая строка")
+        editor.setStyleSheet(
+            "QPlainTextEdit { background: #ffffff; color: #2b2b2b; "
+            "border: 2px solid #1f538d; }"
+        )
+        return editor
+
+    def setEditorData(self, editor, index):
+        text = index.model().data(index, QtCore.Qt.ItemDataRole.EditRole) or ""
+        editor.setPlainText(text)
+        editor.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.toPlainText().strip(), QtCore.Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        # Поле ввода выше самой ячейки, чтобы было удобно печатать много текста
+        rect = QtCore.QRect(option.rect)
+        rect.setHeight(max(rect.height(), self.MIN_EDITOR_HEIGHT))
+        parent = editor.parentWidget()
+        if parent is not None and rect.bottom() > parent.height():
+            rect.moveBottom(parent.height() - 1)
+            if rect.top() < 0:
+                rect.moveTop(0)
+        editor.setGeometry(rect)
+
+    def eventFilter(self, editor, event):
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            mods = event.modifiers()
+            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                if (mods & QtCore.Qt.KeyboardModifier.ShiftModifier) or (
+                    mods & QtCore.Qt.KeyboardModifier.ControlModifier
+                ):
+                    editor.insertPlainText("\n")
+                else:
+                    self.commitData.emit(editor)
+                    self.closeEditor.emit(
+                        editor, QtWidgets.QAbstractItemDelegate.EndEditHint.NoHint
+                    )
+                return True
+            if key == QtCore.Qt.Key.Key_Tab:
+                self.commitData.emit(editor)
+                self.closeEditor.emit(
+                    editor, QtWidgets.QAbstractItemDelegate.EndEditHint.EditNextItem
+                )
+                return True
+        return super().eventFilter(editor, event)
+
+
 class BaseSheet(QtWidgets.QWidget):
 
     OUTCOME_OPTIONS = [
         "Выздоровление",
         "Улучшение",
-        "Без изменений",
+        "Без перемен",
         "Ухудшение",
         "Летальный",
     ]
@@ -160,6 +227,9 @@ class BaseSheet(QtWidgets.QWidget):
         "Мужской",
         "Женский",
     ]
+
+    DEFAULT_COLUMN_WIDTH = 150
+    DEFAULT_WIDTHS: dict = {}  # {название колонки: ширина в px}, задаётся в наследниках
 
     def __init__(
         self,
@@ -178,6 +248,7 @@ class BaseSheet(QtWidgets.QWidget):
         super().__init__(parent)
 
         self.db = DataManager()
+        self.session = AdminSession()
         self.db_key = db_key
         self.columns = columns
         self.mkb_col_idx = mkb_col_idx
@@ -203,18 +274,53 @@ class BaseSheet(QtWidgets.QWidget):
         self.btn_add.clicked.connect(self.add_row)
         self.layout.addWidget(self.btn_add)
 
+        # Кнопка удаления строк (видна только администратору)
+        self.btn_delete = QtWidgets.QPushButton("Удалить выбранные строки")
+        self.btn_delete.clicked.connect(self.delete_selected_rows)
+        self.btn_delete.setVisible(False)
+        self.layout.addWidget(self.btn_delete)
+
         # Таблица
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(len(self.columns))
         self.table.setHorizontalHeaderLabels(self.columns)
 
+        for i, title in enumerate(self.columns):
+            self.table.horizontalHeaderItem(i).setToolTip(title)  # полное название
+
+        # Колонки: ширину можно менять мышкой (тянуть границу заголовка), она запоминается
         self.header = self.table.horizontalHeader()
+        self.header.setStretchLastSection(False)
+        self.header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.header.setMinimumSectionSize(50)
         self.header.setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Interactive
         )
         self.header.setSectionResizeMode(
             len(self.columns) - 1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
+        self.header.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.header.customContextMenuRequested.connect(self._show_header_menu)
+
+        # Длинный текст переносится по словам, высота строки подстраивается под содержимое
+        self.table.setWordWrap(True)
+        self.table.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        self.table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.table.verticalHeader().setDefaultSectionSize(32)
+        self.table.verticalHeader().setMinimumSectionSize(32)
+
+        self.ui_settings = QtCore.QSettings("MedicalApp", "UiLayout")
+        self._applying_widths = False
+        self._row_fit_timer = QtCore.QTimer(self)
+        self._row_fit_timer.setSingleShot(True)
+        self._row_fit_timer.setInterval(40)
+        self._row_fit_timer.timeout.connect(self.table.resizeRowsToContents)
+        self._save_widths_timer = QtCore.QTimer(self)
+        self._save_widths_timer.setSingleShot(True)
+        self._save_widths_timer.setInterval(400)
+        self._save_widths_timer.timeout.connect(self._save_column_widths)
 
         # 1. Делегат МКБ
         if self.mkb_code_col_idx is not None:
@@ -280,9 +386,40 @@ class BaseSheet(QtWidgets.QWidget):
                 self.outcome_col_idx, self.outcome_delegate
             )
 
+        # 8. Многострочный редактор для свободных текстовых колонок
+        has_delegate = {
+            self.mkb_col_idx,
+            self.mkb_code_col_idx,
+            self.doctor_col_idx,
+            self.medication_col_idx,
+            self.gender_col_idx,
+            self.mo_col_idx,
+            self.outcome_col_idx,
+        }
+        if self.streets_list:
+            has_delegate.add(self.address_col_idx)
+        self.multiline_delegate = MultilineTextDelegate(self.table)
+        for col in range(len(self.columns) - 1):
+            title = self.columns[col]
+            if (
+                col in has_delegate
+                or col in self.get_centered_columns()
+                or title.startswith(("Дата", "Время"))
+            ):
+                continue
+            self.table.setItemDelegateForColumn(col, self.multiline_delegate)
+
+        # Контекстное меню (удаление строк для администратора)
+        self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+
         self.layout.addWidget(self.table)
         self.table.itemChanged.connect(self.on_item_changed)
+        self.table.itemChanged.connect(lambda *_: self._schedule_row_fit())
+        self._restore_column_widths()
+        self.header.sectionResized.connect(self._on_section_resized)
         self._start_lock_timer()
+        self.refresh_admin_mode()
 
     def _load_mkb_data(self, file_path: str) -> pd.DataFrame:
         try:
@@ -347,6 +484,164 @@ class BaseSheet(QtWidgets.QWidget):
                 self.doctor_col_idx, self.doctor_delegate
             )
 
+    def refresh_medications_list(self):
+        """Обновляет список препаратов и заново переназначает делегат для колонки."""
+        self.medications_list = self._load_medications_data()
+        if self.medication_col_idx is not None:
+            self.medication_delegate = ListChoiceDelegate(
+                self.medications_list, placeholder="Выберите препарат...", parent=self.table
+            )
+            self.table.setItemDelegateForColumn(
+                self.medication_col_idx, self.medication_delegate
+            )
+
+    def reload_from_file(self):
+        """Полная перезагрузка после смены файла данных: справочники и записи журнала."""
+        self.refresh_doctors_list()
+        self.refresh_medications_list()
+        self.load_data()
+
+    # ------------------------------------------------------------------
+    # Ширина колонок и высота строк
+    # ------------------------------------------------------------------
+    def _schedule_row_fit(self):
+        """Пересчитать высоту строк под текст (с небольшой задержкой, чтобы не тормозить)."""
+        self._row_fit_timer.start()
+
+    def _default_width(self, col: int) -> int:
+        return self.DEFAULT_WIDTHS.get(self.columns[col], self.DEFAULT_COLUMN_WIDTH)
+
+    def _apply_widths(self, widths: list[int]):
+        self._applying_widths = True
+        try:
+            for col, width in enumerate(widths):
+                self.header.resizeSection(col, max(50, int(width)))
+        finally:
+            self._applying_widths = False
+        self._schedule_row_fit()
+
+    def _restore_column_widths(self):
+        count = len(self.columns) - 1  # последняя колонка (кнопка) подгоняется сама
+        widths = None
+        saved = self.ui_settings.value(f"column_widths/{self.db_key}")
+        if saved is not None:
+            try:
+                saved_list = saved if isinstance(saved, (list, tuple)) else [saved]
+                candidate = [int(x) for x in saved_list]
+                if len(candidate) == count:
+                    widths = candidate
+            except (TypeError, ValueError):
+                widths = None
+        if widths is None:
+            widths = [self._default_width(c) for c in range(count)]
+        self._apply_widths(widths)
+
+    def _save_column_widths(self):
+        widths = [self.header.sectionSize(c) for c in range(len(self.columns) - 1)]
+        self.ui_settings.setValue(f"column_widths/{self.db_key}", widths)
+        self.ui_settings.sync()
+
+    def _on_section_resized(self, index, old_size, new_size):
+        if self._applying_widths:
+            return
+        self._schedule_row_fit()
+        self._save_widths_timer.start()
+
+    def _show_header_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        act_reset = menu.addAction("Сбросить ширину колонок")
+        act_fit = menu.addAction("Подогнать ширину под содержимое")
+        chosen = menu.exec(self.header.mapToGlobal(pos))
+        if chosen == act_reset:
+            self._apply_widths(
+                [self._default_width(c) for c in range(len(self.columns) - 1)]
+            )
+            self._save_column_widths()
+        elif chosen == act_fit:
+            for col in range(len(self.columns) - 1):
+                self.table.resizeColumnToContents(col)
+                self.header.resizeSection(col, min(self.header.sectionSize(col), 500))
+            self._schedule_row_fit()
+            self._save_column_widths()
+
+    # ------------------------------------------------------------------
+    # Режим администратора
+    # ------------------------------------------------------------------
+    def _is_admin(self) -> bool:
+        return self.session.is_authenticated()
+
+    def _apply_lock(self, row: int, created_at: str):
+        """Админу строки всегда доступны для редактирования, остальным — политика 60 минут."""
+        was_loading = self.is_loading
+        self.is_loading = True  # setFlags/setBackground шлют itemChanged — не сохраняем
+        try:
+            if self._is_admin():
+                for col in range(self.table.columnCount()):
+                    item = self.table.item(row, col)
+                    if item:
+                        item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsEditable)
+                        item.setBackground(QtGui.QBrush())  # убираем серый фон
+            else:
+                apply_row_lock_policy(self.table, row, created_at)
+        finally:
+            self.is_loading = was_loading
+
+    def refresh_admin_mode(self):
+        """Вызывается при входе/выходе администратора."""
+        self.btn_delete.setVisible(self._is_admin())
+        self._check_row_locks()
+
+    def _selected_rows(self) -> list[int]:
+        return sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
+
+    def _show_context_menu(self, pos):
+        if not self._is_admin():
+            return
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        if index.row() not in self._selected_rows():
+            self.table.selectRow(index.row())
+
+        menu = QtWidgets.QMenu(self)
+        act_delete = menu.addAction("Удалить строку")
+        if menu.exec(self.table.viewport().mapToGlobal(pos)) == act_delete:
+            self.delete_selected_rows()
+
+    def delete_selected_rows(self):
+        if not self._is_admin():
+            return
+
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self, "Удаление", "Выделите строки (клик по номеру строки слева)."
+            )
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Подтверждение",
+            f"Удалить выбранные записи ({len(rows)} шт.)? Действие необратимо.",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        self.is_loading = True
+        for r in rows:  # rows отсортированы по убыванию — индексы не съезжают
+            self.table.removeRow(r)
+        self.is_loading = False
+
+        # Кнопки «Печать»/«Копировать» захватили старый номер строки — пересоздаём
+        for r in range(self.table.rowCount()):
+            self._setup_action_button(r)
+
+        self.save_data()
+        self._schedule_row_fit()
+
     def _start_lock_timer(self):
         """Запускает таймер, обновляющий состояние блокировки строк каждую минуту."""
         self.lock_timer = QtCore.QTimer(self)
@@ -368,9 +663,11 @@ class BaseSheet(QtWidgets.QWidget):
             if not created_at:
                 continue
 
-            apply_row_lock_policy(self.table, row, created_at)
+            self._apply_lock(row, created_at)
 
     def get_centered_columns(self) -> tuple:
+        # Весь текст в таблицах выравнивается по центру; эти колонки (дата, время, код)
+        # дополнительно исключаются из многострочного редактора.
         return (0, 1, 6)
 
     def _setup_action_button(self, row: int):
@@ -400,8 +697,7 @@ class BaseSheet(QtWidgets.QWidget):
                 )
                 item = QtWidgets.QTableWidgetItem(text)
 
-                if col_idx in self.get_centered_columns():
-                    item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
                 self.table.setItem(row_count, col_idx, item)
 
@@ -411,9 +707,10 @@ class BaseSheet(QtWidgets.QWidget):
                 )
 
             self._setup_action_button(row_count)
-            apply_row_lock_policy(self.table, row_count, created_at)
+            self._apply_lock(row_count, created_at)
 
         self.is_loading = False
+        self._schedule_row_fit()
 
     def add_row(self):
         """Добавление новой записи в таблицу с предустановкой доктора по умолчанию."""
@@ -426,8 +723,7 @@ class BaseSheet(QtWidgets.QWidget):
 
         for col_idx in range(self.table.columnCount() - 1):
             item = QtWidgets.QTableWidgetItem("")
-            if col_idx in self.get_centered_columns():
-                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row_count, col_idx, item)
 
         self.table.item(row_count, 0).setData(
@@ -445,7 +741,7 @@ class BaseSheet(QtWidgets.QWidget):
             self.table.item(row_count, self.doctor_col_idx).setText(default_doctor)
 
         self._setup_action_button(row_count)
-        apply_row_lock_policy(self.table, row_count, now_str)
+        self._apply_lock(row_count, now_str)
 
         self.is_loading = False  # Включаем отслеживание обратно
         self.save_data()         # Одиночное сохранение
@@ -461,12 +757,14 @@ class BaseSheet(QtWidgets.QWidget):
         if self.is_loading:
             return
 
-        row = item.row()
-        created_at_item = self.table.item(row, 0)
-        if created_at_item:
-            created_at = created_at_item.data(QtCore.Qt.ItemDataRole.UserRole)
-            if is_record_locked(created_at):
-                return
+        # Администратор может редактировать любые записи, остальным — по политике блокировки
+        if not self._is_admin():
+            row = item.row()
+            created_at_item = self.table.item(row, 0)
+            if created_at_item:
+                created_at = created_at_item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if is_record_locked(created_at):
+                    return
 
         self.save_data()
 

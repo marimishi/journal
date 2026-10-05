@@ -7,6 +7,22 @@ from ui.sheet_template import BaseSheet
 
 class AmbulanceSheet(BaseSheet):
 
+    DEFAULT_WIDTHS = {
+        "Дата": 95,
+        "Время": 70,
+        "ФИО пациента": 200,
+        "Пол": 90,
+        "Дата рождения": 110,
+        "Домашний адрес": 240,
+        "Признаки/симптомы неотложного/экстренного состояния": 300,
+        "Код МКБ": 90,
+        "Диагноз": 240,
+        "Назначенное лечение": 300,
+        "Врач, назначивший лечение": 200,
+        "Исход": 140,
+        "Примечание": 240,
+    }
+
     def __init__(self, parent=None):
         columns = [
             "Дата",
@@ -38,13 +54,6 @@ class AmbulanceSheet(BaseSheet):
             parent=parent,
         )
 
-        self.header.setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.Stretch
-        )
-        self.header.setSectionResizeMode(
-            len(self.columns) - 1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
-
         self.load_data()
 
     def get_centered_columns(self) -> tuple:
@@ -52,7 +61,9 @@ class AmbulanceSheet(BaseSheet):
 
     def _setup_action_button(self, row: int):
         btn_print = QtWidgets.QPushButton("Печать")
-        btn_print.clicked.connect(lambda checked=False, r=row: print_057())
+        btn_print.clicked.connect(
+            lambda checked=False, r=row: self.on_print_clicked(r)
+        )
 
         btn_container = QtWidgets.QWidget()
         btn_layout = QtWidgets.QHBoxLayout(btn_container)
@@ -62,6 +73,17 @@ class AmbulanceSheet(BaseSheet):
 
         print_col_idx = self.table.columnCount() - 1
         self.table.setCellWidget(row, print_col_idx, btn_container)
+
+
+    def on_print_clicked(self, row: int):
+        """Собирает данные строки {заголовок: текст} и открывает печать направления."""
+        data = {}
+        for col in range(self.table.columnCount() - 1):
+            header_item = self.table.horizontalHeaderItem(col)
+            item = self.table.item(row, col)
+            if header_item:
+                data[header_item.text()] = item.text().strip() if item else ""
+        print_057(data, parent=self)
 
 
 if __name__ == "__main__":

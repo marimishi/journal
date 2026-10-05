@@ -1,7 +1,5 @@
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
+# Пароль администратора зашит в программу — впишите свой вместо значения ниже
+ADMIN_PASSWORD = "112"
 
 
 class AdminSession:
@@ -18,9 +16,7 @@ class AdminSession:
         return self._is_authenticated
 
     def login(self, password: str, username: str = "admin") -> bool:
-        PASS = os.getenv("PASS")
-
-        if password == PASS:
+        if password == ADMIN_PASSWORD:
             self._is_authenticated = True
             self._current_user = username
             return True

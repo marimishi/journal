@@ -7,6 +7,7 @@ from ui.admin.admin_panel import AdminPanel
 from ui.ambulance import AmbulanceSheet
 from ui.ambulator import AmbulatorSheet
 from back.data_manager import DataManager
+from ui.functions.data_file import create_new_data_file, pick_existing_data_file
 
 def resource_path(relative_path):
     try:
@@ -53,55 +54,68 @@ class MainScreen(QtWidgets.QMainWindow):
             
         self.frames["AmbulatorSheet"].target_sheet = self.frames["AmbulanceSheet"]
 
+        # Режим администратора в журналах (редактирование любых ячеек, удаление строк)
+        admin_panel = self.frames["AdminPanel"]
+        for name in ("AmbulatorSheet", "AmbulanceSheet"):
+            admin_panel.admin_state_changed.connect(self.frames[name].refresh_admin_mode)
+
+        # При любой смене файла данных перечитываем все таблицы и справочники
+        self.db.add_path_listener(self._reload_all_sheets)
+
         # Проверка наличия и валидности файла базы данных при старте
         self._check_file_path()
 
     def _check_file_path(self):
-        """Проверяет путь к файлу. Если путь не задан или файл перемещен — запрашивает выбор."""
+        """Проверяет путь к файлу. Если путь не задан или файл перемещён — просит выбрать.
+
+        Путь запоминается один раз (QSettings), имя и расширение файла могут быть любыми.
+        """
         while not self.db.has_valid_file_path():
             msg = QtWidgets.QMessageBox(self)
             msg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
             msg.setWindowTitle("Выбор базы данных")
-            
-            if self.db.file_path and not self.db.has_valid_file_path():
+
+            if self.db.file_path:
                 msg.setText("Файл базы данных перемещён или удалён!")
                 msg.setInformativeText(
                     f"Не удалось найти файл по пути:\n{self.db.file_path}\n\n"
-                    "Пожалуйста, укажите новое местоположение или создайте новый файл."
+                    "Укажите его новое местоположение или создайте новый файл."
                 )
             else:
-                msg.setText("Файл сохранения data.json не выбран!")
-                msg.setInformativeText("Выберите путь к зашифрованной базе данных для продолжения работы.")
-            
-            btn_select = msg.addButton("Выбрать / Создать data.json", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-            btn_exit = msg.addButton("Выход из программы", QtWidgets.QMessageBox.ButtonRole.RejectRole)
-            
-            msg.exec()
+                msg.setText("Файл базы данных не выбран!")
+                msg.setInformativeText(
+                    "Выберите существующий файл с данными или создайте новый. "
+                    "Выбор запоминается — повторно спрашивать не будем."
+                )
 
-            if msg.clickedButton() == btn_exit:
-                sys.exit(0)
-
-            file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-                self,
-                "Выберите или создайте файл data.json",
-                "data.json",
-                "JSON Files (*.json)"
+            btn_open = msg.addButton(
+                "Выбрать существующий файл", QtWidgets.QMessageBox.ButtonRole.AcceptRole
             )
-            
-            if file_path:
-                self.db.set_file_path(file_path)
-                # Если файла не существовало, инициализируем базовую структуру
-                if not os.path.exists(file_path):
-                    self.db.save_data({"doctors": [], "ambulator": [], "ambulance": []})
-                
-                # Загружаем данные в открытые таблицы
-                self._reload_all_sheets()
+            btn_create = msg.addButton(
+                "Создать новый файл", QtWidgets.QMessageBox.ButtonRole.ActionRole
+            )
+            btn_exit = msg.addButton(
+                "Выход из программы", QtWidgets.QMessageBox.ButtonRole.RejectRole
+            )
+
+            msg.exec()
+            clicked = msg.clickedButton()
+
+            if clicked == btn_exit:
+                sys.exit(0)
+            elif clicked == btn_open:
+                pick_existing_data_file(self)
+            elif clicked == btn_create:
+                create_new_data_file(self)
+            # смена файла сама вызывает _reload_all_sheets через слушатель DataManager
 
     def _reload_all_sheets(self):
-        """Перезагружает данные во всех дочерних таблицах после выбора файла."""
+        """Перезагружает журналы, справочники и админ-панель после смены файла."""
         for frame in self.frames.values():
-            if hasattr(frame, 'load_data'):
-                frame.load_data()
+            if hasattr(frame, "reload_from_file"):
+                frame.reload_from_file()
+            elif hasattr(frame, "reload_data"):
+                frame.reload_data()
 
     def _create_sidebar(self, parent_layout):
         self.sidebar_frame = QtWidgets.QFrame()

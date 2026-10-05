@@ -7,6 +7,19 @@ from ui.sheet_template import BaseSheet
 
 class AmbulatorSheet(BaseSheet):
 
+    DEFAULT_WIDTHS = {
+        "Дата": 95,
+        "Время": 70,
+        "ФИО врача, вызвавшего БСМП": 200,
+        "ФИО пациента": 200,
+        "Дата рождения": 110,
+        "Домашний адрес": 240,
+        "Код МКБ": 90,
+        "Диагноз": 240,
+        "МО по месту прикрепления пациента": 260,
+        "Время прибытия БСМП": 110,
+    }
+
     def __init__(self, target_sheet=None, parent=None):
         self.target_sheet = target_sheet
 
@@ -33,13 +46,6 @@ class AmbulatorSheet(BaseSheet):
             address_col_idx=5,       # "Домашний адрес"
             mo_col_idx=8,            # "МО по месту прикрепления пациента"
             parent=parent,
-        )
-        self.header.setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.Stretch
-        )
-        self.header.setSectionResizeMode(
-            len(self.columns) - 1,
-            QtWidgets.QHeaderView.ResizeMode.ResizeToContents,
         )
 
         self.load_data()
@@ -69,8 +75,12 @@ class AmbulatorSheet(BaseSheet):
             )
             return
 
+        # «Время прибытия БСМП» из этого журнала становится «Временем» в журнале скорой помощи
         new_row = copy_row_by_headers(
-            self.table, row_idx, self.target_sheet.table
+            self.table,
+            row_idx,
+            self.target_sheet.table,
+            aliases={"Время прибытия БСМП": "Время"},
         )
 
         if hasattr(self.target_sheet, "save_data"):
