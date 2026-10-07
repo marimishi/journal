@@ -7,6 +7,7 @@ from back.data_manager import DataManager
 from back.user.users import AdminSession
 from ui.combo_box.mkb import SearchableComboBox, ListChoiceDelegate
 from ui.functions.lock_policy import apply_row_lock_policy, is_record_locked
+from ui.functions.paths import resource_path
 
 from data import DEFAULT_MEDICATIONS, HOSPITALS
 
@@ -262,8 +263,8 @@ class BaseSheet(QtWidgets.QWidget):
         self.is_loading = False
 
         # Загрузка внешних справочников
-        self.mkb_df = self._load_mkb_data("MKB.csv")
-        self.streets_list = self._load_streets_data("tyumen_streets.csv")
+        self.mkb_df = self._load_mkb_data(resource_path("MKB.csv"))
+        self.streets_list = self._load_streets_data(resource_path("tyumen_streets.csv"))
         self.doctors_list = self._load_doctors_data()
         self.medications_list = self._load_medications_data()
 
