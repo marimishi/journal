@@ -2,6 +2,7 @@ import sys
 from PySide6 import QtWidgets, QtCore
 
 from ui.functions.copy import copy_row_by_headers
+from ui.functions.print import print_conclusion
 from ui.sheet_template import BaseSheet
 
 
@@ -18,7 +19,23 @@ class AmbulatorSheet(BaseSheet):
         "Диагноз": 240,
         "МО по месту прикрепления пациента": 260,
         "Время прибытия БСМП": 110,
+        "АД": 80,
+        "Температура": 100,
+        "Пульс": 70,
+        "Сатурация": 90,
+        "Сахар крови": 100,
+        "ЭКГ": 200,
+        "Назначенное лечение": 300,
     }
+
+    ACTION_COLUMNS = 2  # «Копировать» и «Печать»
+
+    # Колонки прежней версии файла — по ним читаются старые записи
+    LEGACY_COLUMNS = [
+        "Дата", "Время", "ФИО врача, вызвавшего БСМП", "ФИО пациента", "Дата рождения",
+        "Домашний адрес", "Код МКБ", "Диагноз", "МО по месту прикрепления пациента",
+        "Время прибытия БСМП",
+    ]
 
     def __init__(self, target_sheet=None, parent=None):
         self.target_sheet = target_sheet
@@ -34,7 +51,15 @@ class AmbulatorSheet(BaseSheet):
             "Диагноз",
             "МО по месту прикрепления пациента",
             "Время прибытия БСМП",
+            "АД",
+            "Температура",
+            "Пульс",
+            "Сатурация",
+            "Сахар крови",
+            "ЭКГ",
+            "Назначенное лечение",
             "Копировать",
+            "Печать",
         ]
 
         super().__init__(
@@ -45,28 +70,43 @@ class AmbulatorSheet(BaseSheet):
             doctor_col_idx=2,        # "ФИО врача, вызвавшего БСМП"
             address_col_idx=5,       # "Домашний адрес"
             mo_col_idx=8,            # "МО по месту прикрепления пациента"
+            medication_col_idx=16,   # "Назначенное лечение"
             parent=parent,
         )
 
         self.load_data()
 
     def get_centered_columns(self) -> tuple:
-        return (0, 1, 6)
+        return (0, 1, 6, 10, 11, 12, 13, 14)
+
+    def _make_button_cell(self, text: str, handler, col: int, row: int):
+        btn = QtWidgets.QPushButton(text)
+        btn.clicked.connect(lambda checked=False, r=row: handler(r))
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.addWidget(btn)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.table.setCellWidget(row, col, container)
 
     def _setup_action_button(self, row: int):
-        btn_copy = QtWidgets.QPushButton("Копировать")
-        btn_copy.clicked.connect(
-            lambda checked=False, r=row: self.on_copy_clicked(r)
-        )
+        count = self.table.columnCount()
+        self._make_button_cell("Копировать", self.on_copy_clicked, count - 2, row)
+        self._make_button_cell("Печать", self.on_print_clicked, count - 1, row)
 
-        btn_container = QtWidgets.QWidget()
-        btn_layout = QtWidgets.QHBoxLayout(btn_container)
-        btn_layout.addWidget(btn_copy)
-        btn_layout.setContentsMargins(2, 2, 2, 2)
-        btn_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
-        copy_col_idx = self.table.columnCount() - 1
-        self.table.setCellWidget(row, copy_col_idx, btn_container)
+    def on_print_clicked(self, row: int):
+        """Собирает данные строки и открывает печать заключения."""
+        data = {}
+        for col in range(self.data_cols):
+            header_item = self.table.horizontalHeaderItem(col)
+            item = self.table.item(row, col)
+            if header_item:
+                data[header_item.text()] = item.text().strip() if item else ""
+        # В форме врач и время называются как в журнале скорой помощи
+        data["Врач, назначивший лечение"] = data.get("ФИО врача, вызвавшего БСМП", "")
+        data["Время"] = data.get("Время прибытия БСМП") or data.get("Время", "")
+        print_conclusion(data, parent=self)
 
     def on_copy_clicked(self, row_idx: int):
         if not self.target_sheet or not hasattr(self.target_sheet, "table"):

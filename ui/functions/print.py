@@ -1,4 +1,5 @@
-"""Печать «Направления в дежурный стационар по экстренным показаниям» (Приложение 11).
+"""Печать «Направления в дежурный стационар по экстренным показаниям» (Приложение 11)
+и «Заключения» (амбулаторное лечение — та же форма без приложения и с другим заголовком).
 
 Форма рисуется через QPainter, поэтому никаких дополнительных библиотек не нужно —
 хватает PySide6. Открывается окно предпросмотра, в нём кнопка принтера печатает
@@ -23,6 +24,9 @@ ORG_LINES = [
     "тел.: +8(3452)561240",
 ]
 FONT_NAME = "Arial"
+
+DIRECTION_TITLE = "Направление в дежурный стационар по экстренным показаниям"
+CONCLUSION_TITLE = "Заключение"
 
 
 def _years_word(n: int) -> str:
@@ -58,9 +62,12 @@ class _FormRenderer:
     PITCH = 8.0   # шаг между строками, мм
     LEFT = 5.0    # левая граница, мм
 
-    def __init__(self, painter: QtGui.QPainter, printer: QPrinter, data: dict):
+    def __init__(self, painter: QtGui.QPainter, printer: QPrinter, data: dict,
+                 title: str = DIRECTION_TITLE, with_appendix: bool = True):
         self.p = painter
         self.data = data
+        self.title = title
+        self.with_appendix = with_appendix
         self.dpi = painter.device().logicalDpiX()
         self.M = self.dpi / 25.4  # пикселей в миллиметре
         page_w = printer.pageRect(QPrinter.Unit.Millimeter).width()
@@ -172,12 +179,13 @@ class _FormRenderer:
         # Шапка
         self.y = 5
         self._font(10)
-        self._right(self.y, "Приложение 11")
-        self.y += 5.5
-        self._right(
-            self.y,
-            f"к приказу от «{ORDER_DAY}» {ORDER_MONTH} {ORDER_YEAR} г. № {ORDER_NUMBER}/24-ос",
-        )
+        if self.with_appendix:
+            self._right(self.y, "Приложение 11")
+            self.y += 5.5
+            self._right(
+                self.y,
+                f"к приказу от «{ORDER_DAY}» {ORDER_MONTH} {ORDER_YEAR} г. № {ORDER_NUMBER}/24-ос",
+            )
 
         self.y = 21
         self._font(11, bold=True)
@@ -187,7 +195,7 @@ class _FormRenderer:
 
         self.y = 52
         self._font(11, underline=True)
-        self._center(self.y, "Направление в дежурный стационар по экстренным показаниям")
+        self._center(self.y, self.title)
 
         # Данные пациента
         self._font(10)
@@ -264,22 +272,18 @@ class _FormRenderer:
         self._line(x, x + 40, self.y + 1.3)
 
 
-def _render(printer: QPrinter, data: dict):
+def _render(printer: QPrinter, data: dict, title: str, with_appendix: bool):
     painter = QtGui.QPainter()
     if not painter.begin(printer):
         return
     try:
         painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
-        _FormRenderer(painter, printer, data).render()
+        _FormRenderer(painter, printer, data, title, with_appendix).render()
     finally:
         painter.end()
 
 
-def print_057(data: dict, parent=None):
-    """Открывает предпросмотр направления, заполненного данными строки журнала.
-
-    data — словарь {название колонки: текст ячейки}.
-    """
+def _preview(data: dict, window_title: str, title: str, with_appendix: bool, parent=None):
     printer = QPrinter(QPrinter.PrinterMode.HighResolution)
     printer.setPageSize(QtGui.QPageSize(QtGui.QPageSize.PageSizeId.A4))
     printer.setPageMargins(
@@ -287,7 +291,22 @@ def print_057(data: dict, parent=None):
     )
 
     dialog = QPrintPreviewDialog(printer, parent)
-    dialog.setWindowTitle("Направление в дежурный стационар — предпросмотр")
-    dialog.paintRequested.connect(lambda pr: _render(pr, data))
+    dialog.setWindowTitle(window_title)
+    dialog.paintRequested.connect(lambda pr: _render(pr, data, title, with_appendix))
     dialog.resize(1000, 850)
     dialog.exec()
+
+
+def print_057(data: dict, parent=None):
+    """Предпросмотр направления (скорая помощь), заполненного данными строки журнала.
+
+    data — словарь {название колонки: текст ячейки}.
+    """
+    _preview(data, "Направление в дежурный стационар — предпросмотр",
+             DIRECTION_TITLE, True, parent)
+
+
+def print_conclusion(data: dict, parent=None):
+    """Предпросмотр заключения (амбулаторное лечение): та же форма, но заголовок
+    «Заключение» и без «Приложение 11 к приказу»."""
+    _preview(data, "Заключение — предпросмотр", CONCLUSION_TITLE, False, parent)

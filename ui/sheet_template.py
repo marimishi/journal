@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, datetime
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -54,7 +55,7 @@ class MkbComboBox(QtWidgets.QComboBox):
     
     mkb_selected = QtCore.Signal(str, str)
 
-    def __init__(self, mkb_df: pd.DataFrame, parent=None):
+    def __init__(self, mkb_df: pd.DataFrame, parent=None, code_mode: bool = False):
         super().__init__(parent)
         self.setEditable(True)
         self.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
@@ -70,10 +71,16 @@ class MkbComboBox(QtWidgets.QComboBox):
                 self._text_to_data[display_str] = (code, name)
 
         self.setCurrentIndex(-1)
-        self.lineEdit().setPlaceholderText("Введите код или диагноз...")
+        self.lineEdit().setPlaceholderText(
+            "Введите код (например, I10)..." if code_mode else "Введите код или диагноз..."
+        )
 
         completer = QtWidgets.QCompleter(self.model(), self)
-        completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
+        # Поиск по коду: строка вида «КОД - диагноз», поэтому ищем по началу строки
+        completer.setFilterMode(
+            QtCore.Qt.MatchFlag.MatchStartsWith if code_mode
+            else QtCore.Qt.MatchFlag.MatchContains
+        )
         completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
         
         # Разделяем обработку сигналов
@@ -109,13 +116,18 @@ class MkbComboBox(QtWidgets.QComboBox):
 
 
 class MkbDelegate(QtWidgets.QStyledItemDelegate):
-    def __init__(self, mkb_df, parent=None, code_col_idx=None):
+    def __init__(self, mkb_df, parent=None, code_col_idx=None,
+                 name_col_idx=None, code_mode=False):
+        """code_mode=True — делегат стоит на колонке «Код МКБ» (поиск по коду);
+        при выборе заполняется и код, и диагноз (колонка name_col_idx)."""
         super().__init__(parent)
         self.mkb_df = mkb_df
         self.code_col_idx = code_col_idx
+        self.name_col_idx = name_col_idx
+        self.code_mode = code_mode
 
     def createEditor(self, parent, option, index):
-        editor = MkbComboBox(self.mkb_df, parent)
+        editor = MkbComboBox(self.mkb_df, parent, code_mode=self.code_mode)
         editor.selected_code = None
         editor.selected_name = None
 
@@ -138,6 +150,15 @@ class MkbDelegate(QtWidgets.QStyledItemDelegate):
         editor.lineEdit().selectAll()
 
     def setModelData(self, editor, model, index):
+        if self.code_mode:
+            if getattr(editor, 'selected_code', None) is not None:
+                model.setData(index, editor.selected_code, QtCore.Qt.ItemDataRole.EditRole)
+                if self.name_col_idx is not None:
+                    name_index = model.index(index.row(), self.name_col_idx)
+                    model.setData(name_index, editor.selected_name, QtCore.Qt.ItemDataRole.EditRole)
+            else:
+                model.setData(index, editor.lineEdit().text().strip(), QtCore.Qt.ItemDataRole.EditRole)
+            return
         if getattr(editor, 'selected_name', None) is not None:
             model.setData(index, editor.selected_name, QtCore.Qt.ItemDataRole.EditRole)
             
@@ -214,6 +235,201 @@ class MultilineTextDelegate(QtWidgets.QStyledItemDelegate):
         return super().eventFilter(editor, event)
 
 
+class MultiChoiceEditor(QtWidgets.QFrame):
+    """Редактор с выбором нескольких значений из списка (чекбоксы + поиск).
+
+    Итог записывается в ячейку через запятую. Enter в строке поиска — отметить
+    первый найденный пункт (если ничего не найдено — добавить введённый текст как свой).
+    """
+
+    finished = QtCore.Signal()
+
+    def __init__(self, items: list[str], parent=None):
+        super().__init__(parent)
+        self.setObjectName("MultiChoiceEditor")
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            "#MultiChoiceEditor { background: #ffffff; border: 2px solid #1f538d; }"
+            "#MultiChoiceEditor QLabel { color: #555555; }"
+            "#MultiChoiceEditor QLineEdit, #MultiChoiceEditor QListWidget "
+            "{ background: #ffffff; color: #2b2b2b; }"
+        )
+        self.items = list(items)
+        self.selected: list[str] = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        self.search = QtWidgets.QLineEdit()
+        self.search.setPlaceholderText("Поиск. Enter — отметить найденное")
+        self.search.textChanged.connect(self._apply_filter)
+        self.search.returnPressed.connect(self._on_enter)
+        layout.addWidget(self.search)
+
+        self.list = QtWidgets.QListWidget()
+        self.list.itemClicked.connect(self._toggle_item)
+        layout.addWidget(self.list, 1)
+
+        # Свой вариант — для препаратов, которых нет в справочнике
+        custom_row = QtWidgets.QHBoxLayout()
+        self.custom = QtWidgets.QLineEdit()
+        self.custom.setPlaceholderText("Свой вариант — впишите текст и нажмите «Добавить»")
+        self.custom.returnPressed.connect(self._add_custom)
+        btn_custom = QtWidgets.QPushButton("＋ Добавить")
+        btn_custom.clicked.connect(self._add_custom)
+        custom_row.addWidget(self.custom, 1)
+        custom_row.addWidget(btn_custom)
+        layout.addLayout(custom_row)
+
+        bottom = QtWidgets.QHBoxLayout()
+        self.hint = QtWidgets.QLabel("Можно выбрать несколько — запишутся через запятую")
+        btn_done = QtWidgets.QPushButton("Готово")
+        btn_done.clicked.connect(self.finished.emit)
+        bottom.addWidget(self.hint, 1)
+        bottom.addWidget(btn_done)
+        layout.addLayout(bottom)
+
+        self.setFocusProxy(self.search)
+
+    # --- данные ---
+    def set_text(self, text: str):
+        """Разбирает текущее значение ячейки: известные пункты + прочий текст."""
+        text = text or ""
+        spans = []
+        for med in self.items:
+            start = text.find(med)
+            if start >= 0:
+                spans.append((start, start + len(med), med))
+        spans.sort()
+        selected, pos = [], 0
+        for start, end, med in spans:
+            if start < pos:  # пересечение с предыдущим — пропускаем
+                continue
+            selected += self._custom_pieces(text[pos:start])
+            selected.append(med)
+            pos = end
+        selected += self._custom_pieces(text[pos:])
+        self.selected = selected
+
+        self.list.clear()
+        for value in [v for v in selected if v not in self.items]:
+            self._add_list_item(value)
+        for value in self.items:
+            self._add_list_item(value)
+
+    @staticmethod
+    def _custom_pieces(chunk: str) -> list[str]:
+        chunk = chunk.strip(" ,;\n")
+        return [chunk] if chunk else []
+
+    def _add_list_item(self, value: str):
+        item = QtWidgets.QListWidgetItem(value)
+        item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+        item.setCheckState(
+            QtCore.Qt.CheckState.Checked if value in self.selected
+            else QtCore.Qt.CheckState.Unchecked
+        )
+        self.list.addItem(item)
+
+    def text(self) -> str:
+        return ", ".join(self.selected)
+
+    # --- поведение ---
+    def _toggle_item(self, item: QtWidgets.QListWidgetItem):
+        value = item.text()
+        if item.checkState() == QtCore.Qt.CheckState.Checked:
+            item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+            if value in self.selected:
+                self.selected.remove(value)
+        else:
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            if value not in self.selected:
+                self.selected.append(value)
+
+    def _add_custom(self):
+        """Добавляет введённый вручную текст как отмеченный пункт."""
+        value = self.custom.text().strip(" ,;")
+        if not value:
+            return
+        if value not in self.selected:
+            self.selected.append(value)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.text() == value:
+                item.setCheckState(QtCore.Qt.CheckState.Checked)
+                break
+        else:
+            item = QtWidgets.QListWidgetItem(value)
+            item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            self.list.insertItem(0, item)
+        self.custom.clear()
+        self.custom.setFocus()
+
+    def _apply_filter(self, text: str):
+        needle = text.strip().lower()
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
+
+    def _on_enter(self):
+        needle = self.search.text().strip()
+        if not needle:
+            self.finished.emit()  # Enter в пустом поиске — завершить выбор
+            return
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if not item.isHidden():
+                if item.checkState() != QtCore.Qt.CheckState.Checked:
+                    self._toggle_item(item)
+                break
+        else:  # ничего не найдено — добавляем введённый текст как свой пункт
+            if needle not in self.selected:
+                self.selected.append(needle)
+                self._add_list_item(needle)
+        self.search.clear()
+
+
+class MultiChoiceDelegate(QtWidgets.QStyledItemDelegate):
+    """Делегат: выбор нескольких значений из списка, запись через запятую."""
+
+    EDITOR_SIZE = QtCore.QSize(540, 370)
+
+    def __init__(self, items_list: list[str], parent=None):
+        super().__init__(parent)
+        self.items_list = items_list
+
+    def createEditor(self, parent, option, index):
+        editor = MultiChoiceEditor(self.items_list, parent)
+
+        def finish():
+            self.commitData.emit(editor)
+            self.closeEditor.emit(
+                editor, QtWidgets.QAbstractItemDelegate.EndEditHint.NoHint
+            )
+
+        editor.finished.connect(finish)
+        return editor
+
+    def setEditorData(self, editor, index):
+        editor.set_text(index.model().data(index, QtCore.Qt.ItemDataRole.EditRole) or "")
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.text(), QtCore.Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        rect = QtCore.QRect(option.rect.topLeft(), self.EDITOR_SIZE)
+        parent = editor.parentWidget()
+        if parent is not None:
+            if rect.right() > parent.width():
+                rect.moveRight(parent.width() - 1)
+            if rect.bottom() > parent.height():
+                rect.moveBottom(parent.height() - 1)
+            rect.moveLeft(max(0, rect.left()))
+            rect.moveTop(max(0, rect.top()))
+        editor.setGeometry(rect)
+
+
 class BaseSheet(QtWidgets.QWidget):
 
     OUTCOME_OPTIONS = [
@@ -231,6 +447,9 @@ class BaseSheet(QtWidgets.QWidget):
 
     DEFAULT_COLUMN_WIDTH = 150
     DEFAULT_WIDTHS: dict = {}  # {название колонки: ширина в px}, задаётся в наследниках
+    ACTION_COLUMNS = 1         # сколько последних колонок — кнопки (не данные)
+    # Колонки данных в прежней версии файла (для записей без списка заголовков)
+    LEGACY_COLUMNS: list | None = None
 
     def __init__(
         self,
@@ -252,6 +471,7 @@ class BaseSheet(QtWidgets.QWidget):
         self.session = AdminSession()
         self.db_key = db_key
         self.columns = columns
+        self.data_cols = len(columns) - self.ACTION_COLUMNS
         self.mkb_col_idx = mkb_col_idx
         self.address_col_idx = address_col_idx
         self.doctor_col_idx = doctor_col_idx
@@ -297,9 +517,10 @@ class BaseSheet(QtWidgets.QWidget):
         self.header.setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Interactive
         )
-        self.header.setSectionResizeMode(
-            len(self.columns) - 1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
+        for col in range(self.data_cols, len(self.columns)):
+            self.header.setSectionResizeMode(
+                col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
         self.header.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.header.customContextMenuRequested.connect(self._show_header_menu)
 
@@ -335,6 +556,16 @@ class BaseSheet(QtWidgets.QWidget):
             self.mkb_col_idx, self.mkb_delegate
         )
 
+        # 1а. Поиск по коду МКБ: делегат на колонке «Код МКБ» заполняет код и диагноз
+        self._code_col = (
+            self.mkb_code_col_idx if self.mkb_code_col_idx is not None
+            else self.mkb_col_idx - 1
+        )
+        self.mkb_code_delegate = MkbDelegate(
+            self.mkb_df, self.table, name_col_idx=self.mkb_col_idx, code_mode=True
+        )
+        self.table.setItemDelegateForColumn(self._code_col, self.mkb_code_delegate)
+
         # 2. Делегат адресов
         if self.address_col_idx is not None and self.streets_list:
             self.address_delegate = AddressDelegate(self.streets_list, self.table)
@@ -353,8 +584,8 @@ class BaseSheet(QtWidgets.QWidget):
 
         # 4. Делегат препаратов
         if self.medication_col_idx is not None:
-            self.medication_delegate = ListChoiceDelegate(
-                self.medications_list, placeholder="Выберите препарат...", parent=self.table
+            self.medication_delegate = MultiChoiceDelegate(
+                self.medications_list, parent=self.table
             )
             self.table.setItemDelegateForColumn(
                 self.medication_col_idx, self.medication_delegate
@@ -390,7 +621,7 @@ class BaseSheet(QtWidgets.QWidget):
         # 8. Многострочный редактор для свободных текстовых колонок
         has_delegate = {
             self.mkb_col_idx,
-            self.mkb_code_col_idx,
+            self._code_col,
             self.doctor_col_idx,
             self.medication_col_idx,
             self.gender_col_idx,
@@ -400,7 +631,7 @@ class BaseSheet(QtWidgets.QWidget):
         if self.streets_list:
             has_delegate.add(self.address_col_idx)
         self.multiline_delegate = MultilineTextDelegate(self.table)
-        for col in range(len(self.columns) - 1):
+        for col in range(self.data_cols):
             title = self.columns[col]
             if (
                 col in has_delegate
@@ -489,8 +720,8 @@ class BaseSheet(QtWidgets.QWidget):
         """Обновляет список препаратов и заново переназначает делегат для колонки."""
         self.medications_list = self._load_medications_data()
         if self.medication_col_idx is not None:
-            self.medication_delegate = ListChoiceDelegate(
-                self.medications_list, placeholder="Выберите препарат...", parent=self.table
+            self.medication_delegate = MultiChoiceDelegate(
+                self.medications_list, parent=self.table
             )
             self.table.setItemDelegateForColumn(
                 self.medication_col_idx, self.medication_delegate
@@ -522,7 +753,7 @@ class BaseSheet(QtWidgets.QWidget):
         self._schedule_row_fit()
 
     def _restore_column_widths(self):
-        count = len(self.columns) - 1  # последняя колонка (кнопка) подгоняется сама
+        count = self.data_cols  # последняя колонка (кнопка) подгоняется сама
         widths = None
         saved = self.ui_settings.value(f"column_widths/{self.db_key}")
         if saved is not None:
@@ -538,7 +769,7 @@ class BaseSheet(QtWidgets.QWidget):
         self._apply_widths(widths)
 
     def _save_column_widths(self):
-        widths = [self.header.sectionSize(c) for c in range(len(self.columns) - 1)]
+        widths = [self.header.sectionSize(c) for c in range(self.data_cols)]
         self.ui_settings.setValue(f"column_widths/{self.db_key}", widths)
         self.ui_settings.sync()
 
@@ -555,11 +786,11 @@ class BaseSheet(QtWidgets.QWidget):
         chosen = menu.exec(self.header.mapToGlobal(pos))
         if chosen == act_reset:
             self._apply_widths(
-                [self._default_width(c) for c in range(len(self.columns) - 1)]
+                [self._default_width(c) for c in range(self.data_cols)]
             )
             self._save_column_widths()
         elif chosen == act_fit:
-            for col in range(len(self.columns) - 1):
+            for col in range(self.data_cols):
                 self.table.resizeColumnToContents(col)
                 self.header.resizeSection(col, min(self.header.sectionSize(col), 500))
             self._schedule_row_fit()
@@ -690,9 +921,9 @@ class BaseSheet(QtWidgets.QWidget):
             self.table.insertRow(row_count)
 
             created_at = record_data.get("created_at", "")
-            row_values = record_data.get("values", [])
+            row_values = self._align_values(record_data)
 
-            for col_idx in range(self.table.columnCount() - 1):
+            for col_idx in range(self.data_cols):
                 text = (
                     row_values[col_idx] if col_idx < len(row_values) else ""
                 )
@@ -713,6 +944,21 @@ class BaseSheet(QtWidgets.QWidget):
         self.is_loading = False
         self._schedule_row_fit()
 
+    def _align_values(self, record: dict) -> list[str]:
+        """Приводит значения записи к текущему набору колонок.
+
+        Запись хранит названия колонок, с которыми была сохранена (старые записи —
+        нет, для них берётся LEGACY_COLUMNS), поэтому новые колонки можно добавлять
+        в любое место таблицы без потери данных.
+        """
+        values = record.get("values", [])
+        current = self.columns[: self.data_cols]
+        saved_cols = record.get("columns") or self.LEGACY_COLUMNS or current
+        if list(saved_cols) == current:
+            return values
+        lookup = dict(zip(saved_cols, values))
+        return [lookup.get(name, "") for name in current]
+
     def add_row(self):
         """Добавление новой записи в таблицу с предустановкой доктора по умолчанию."""
         self.is_loading = True  # Блокируем триггер itemChanged на время формирования строки
@@ -722,7 +968,7 @@ class BaseSheet(QtWidgets.QWidget):
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        for col_idx in range(self.table.columnCount() - 1):
+        for col_idx in range(self.data_cols):
             item = QtWidgets.QTableWidgetItem("")
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row_count, col_idx, item)
@@ -785,11 +1031,15 @@ class BaseSheet(QtWidgets.QWidget):
             )
 
             row_values = []
-            for col in range(self.table.columnCount() - 1):
+            for col in range(self.data_cols):
                 item = self.table.item(row, col)
                 row_values.append(item.text() if item else "")
 
-            records.append({"created_at": created_at, "values": row_values})
+            records.append({
+                "created_at": created_at,
+                "columns": self.columns[: self.data_cols],
+                "values": row_values,
+            })
 
         full_db_data[self.db_key] = records
         self.db.save_data(full_db_data)

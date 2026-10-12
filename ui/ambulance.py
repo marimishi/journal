@@ -15,6 +15,12 @@ class AmbulanceSheet(BaseSheet):
         "Дата рождения": 110,
         "Домашний адрес": 240,
         "Признаки/симптомы неотложного/экстренного состояния": 300,
+        "АД": 80,
+        "Температура": 100,
+        "Пульс": 70,
+        "Сатурация": 90,
+        "Сахар крови": 100,
+        "ЭКГ": 200,
         "Код МКБ": 90,
         "Диагноз": 240,
         "Назначенное лечение": 300,
@@ -22,6 +28,13 @@ class AmbulanceSheet(BaseSheet):
         "Исход": 140,
         "Примечание": 240,
     }
+
+    # Колонки прежней версии файла — по ним читаются старые записи
+    LEGACY_COLUMNS = [
+        "Дата", "Время", "ФИО пациента", "Пол", "Дата рождения", "Домашний адрес",
+        "Признаки/симптомы неотложного/экстренного состояния", "Код МКБ", "Диагноз",
+        "Назначенное лечение", "Врач, назначивший лечение", "Исход", "Примечание",
+    ]
 
     def __init__(self, parent=None):
         columns = [
@@ -32,6 +45,12 @@ class AmbulanceSheet(BaseSheet):
             "Дата рождения",
             "Домашний адрес",
             "Признаки/симптомы неотложного/экстренного состояния",
+            "АД",
+            "Температура",
+            "Пульс",
+            "Сатурация",
+            "Сахар крови",
+            "ЭКГ",
             "Код МКБ",
             "Диагноз",
             "Назначенное лечение",
@@ -44,20 +63,20 @@ class AmbulanceSheet(BaseSheet):
         super().__init__(
             db_key="ambulance",
             columns=columns,
-            mkb_col_idx=8,
-            mkb_code_col_idx=7,
+            mkb_col_idx=14,
+            mkb_code_col_idx=13,
             address_col_idx=5,
             gender_col_idx=3,        # "Пол"
-            medication_col_idx=9,    # "Назначенное лечение"
-            doctor_col_idx=10,       # "Врач, назначивший лечение"
-            outcome_col_idx=11,      # "Исход"
+            medication_col_idx=15,   # "Назначенное лечение"
+            doctor_col_idx=16,       # "Врач, назначивший лечение"
+            outcome_col_idx=17,      # "Исход"
             parent=parent,
         )
 
         self.load_data()
 
     def get_centered_columns(self) -> tuple:
-        return (0, 1, 7)
+        return (0, 1, 7, 8, 9, 10, 11, 12, 13)
 
     def _setup_action_button(self, row: int):
         btn_print = QtWidgets.QPushButton("Печать")
